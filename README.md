@@ -8,6 +8,13 @@ use std::time::Duration;
 
 use nysa::global as bus;
 
+enum Add {
+   Two(i32, i32),
+   Quit,
+}
+
+struct AdditionResult(i32);
+
 fn main() {
    let adder = std::thread::spawn(move || loop {
       match bus::wait_for::<Add>() {
