@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
-const ATOMIC_ORDERING: Ordering = Ordering::Relaxed;
+const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 
 /// A bus for passing messages across threads.
 ///
