@@ -1,7 +1,12 @@
 [package]
 name = "nysa"
+description = "A bus for passing messages around between independent subsystems of an application"
 version = "0.1.0"
 edition = "2018"
+license = "MIT"
+repository = "https://github.com/liquidev/nysa"
+readme = "README.md"
+categories = ["concurrency", "asynchronous"]
 
 [features]
 default = ["global"]
