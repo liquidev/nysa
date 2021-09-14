@@ -1,0 +1,11 @@
+[package]
+name = "nysa"
+version = "0.1.0"
+edition = "2018"
+
+[features]
+default = ["global"]
+global = ["lazy_static"]
+
+[dependencies]
+lazy_static = { version = "1.4.0", optional = true }
