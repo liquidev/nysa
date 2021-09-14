@@ -3,7 +3,6 @@
 A bus for passing messages around between independent subsystems of an application.
 
 ```rs
-use std::ops::ControlFlow;
 use std::time::Duration;
 
 use nysa::global as bus;
@@ -32,7 +31,6 @@ fn main() {
 
    bus::retrieve_all(|AdditionResult(x)| {
       println!("{}", x);
-      ControlFlow::Continue(())
    });
 }
 ```

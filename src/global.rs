@@ -1,7 +1,7 @@
 //! A shared bus for applications that don't need more than one. Comes with some utility methods
 //! for simplified usage.
 
-use std::{ops::ControlFlow, time::Duration};
+use std::time::Duration;
 
 use lazy_static::lazy_static;
 
@@ -20,7 +20,7 @@ where
 }
 
 /// Retrieves all messages of the given type from the global bus.
-pub fn retrieve_all<T>(iter: impl FnMut(T) -> ControlFlow<()>)
+pub fn retrieve_all<T>(iter: impl FnMut(T))
 where
    T: 'static + Send,
 {

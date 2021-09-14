@@ -3,7 +3,7 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::ops::{ControlFlow, Deref};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
@@ -43,7 +43,7 @@ impl Bus {
    /// # See also
    /// - [`Bus::wait_for`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn retrieve_all<T>(&self, mut iter: impl FnMut(T) -> ControlFlow<()>)
+   pub fn retrieve_all<T>(&self, mut iter: impl FnMut(T))
    where
       T: 'static + Send,
    {
@@ -59,10 +59,7 @@ impl Bus {
       let mut store = store_mutex.lock().unwrap();
       for message in store.messages.drain(..) {
          if let Some(data) = message.consume() {
-            match iter(data) {
-               ControlFlow::Continue(()) => (),
-               ControlFlow::Break(()) => break,
-            }
+            iter(data);
          }
       }
    }

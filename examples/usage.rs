@@ -1,6 +1,6 @@
 // The following examples show how to use nysa buses for simple task orchestration between threads.
 
-use std::{ops::ControlFlow, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use nysa::Bus;
 
@@ -53,7 +53,6 @@ fn local_bus() {
    // is locked and new messages will not be pushed until the loop finishes.
    bus.retrieve_all(|AdditionResult(x)| {
       println!("{}", x);
-      ControlFlow::Continue(())
    });
 }
 
@@ -80,7 +79,6 @@ fn global_bus() {
    // We use `nysa::global::retrieve_all` to retrieve all messages of a given type from the bus.
    bus::retrieve_all(|AdditionResult(x)| {
       println!("{}", x);
-      ControlFlow::Continue(())
    });
 }
 
