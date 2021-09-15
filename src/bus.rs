@@ -3,9 +3,10 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
@@ -47,56 +48,50 @@ impl Bus {
    where
       T: 'static + Send,
    {
-      let type_id = TypeId::of::<T>();
-      let store_mutex = {
-         let locked = self.inner.lock().unwrap();
-         let mut borrowed = locked.borrow_mut();
-         match borrowed.messages.get_mut(&type_id) {
-            Some(store) => Arc::clone(store),
-            _ => return,
-         }
-      };
-      let mut store = store_mutex.lock().unwrap();
-      for message in store.messages.drain(..) {
-         if let Some(data) = message.consume() {
-            iter(data);
-         }
-      }
+      // let type_id = TypeId::of::<T>();
+      // let store_mutex = {
+      //    let locked = self.inner.lock().unwrap();
+      //    let mut borrowed = locked.borrow_mut();
+      //    match borrowed.messages.get_mut(&type_id) {
+      //       Some(store) => Arc::clone(store),
+      //       _ => return,
+      //    }
+      // };
+      // let mut store = store_mutex.lock().unwrap();
+      // for message in store.messages.iter() {}
    }
 
    /// Blocks execution until a message of the given type arrives on the bus.
-   fn wait_for_impl<T>(&self, timeout: Option<Duration>) -> Option<T>
+   fn wait_for_impl<T>(&self, timeout: Option<Duration>) -> Option<MessageToken<'_, T>>
    where
       T: 'static + Send,
    {
       let type_id = TypeId::of::<T>();
 
-      let mut locked = self.inner.lock().unwrap();
-      let wakeup = {
+      let store = {
+         let locked = self.inner.lock().unwrap();
          let mut borrowed = locked.borrow_mut();
-         let store = borrowed.get_or_create_message_store(type_id);
-         Arc::clone(&store.wakeup)
+         Arc::clone(borrowed.get_or_create_message_store(type_id))
       };
+      let mut messages = store.messages.lock().unwrap();
 
-      while wakeup.count.load(ATOMIC_ORDERING) == 0 {
+      while messages.len() - store.freed_messages.lock().unwrap().len() == 0 {
          match timeout {
             Some(duration) => {
-               let (mguard, timeout) = wakeup.condvar.wait_timeout(locked, duration).unwrap();
-               locked = mguard;
+               let (mguard, timeout) = store.condvar.wait_timeout(messages, duration).unwrap();
+               messages = mguard;
                if timeout.timed_out() {
                   return None;
                }
             }
             None => {
-               locked = wakeup.condvar.wait(locked).unwrap();
+               messages = store.condvar.wait(messages).unwrap();
             }
          }
       }
-      let mut borrowed = locked.borrow_mut();
-      let mut store = borrowed.get_message_store(type_id);
-      let message = store.messages.pop_front().unwrap();
 
-      Some(message.consume::<T>().unwrap())
+      let token = MessageToken::new(message);
+      Some(token)
    }
 
    /// Blocks execution in the current thread indefinitely until a message of the provided type
@@ -109,7 +104,7 @@ impl Bus {
    /// # See also
    /// - [`Bus::retrieve_all`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn wait_for<T>(&self) -> T
+   pub fn wait_for<T>(&self) -> MessageToken<'_, T>
    where
       T: 'static + Send,
    {
@@ -127,7 +122,7 @@ impl Bus {
    /// # See also
    /// - [`Bus::retrieve_all`]
    /// - [`Bus::wait_for`]
-   pub fn wait_for_timeout<T>(&self, timeout: Duration) -> Option<T>
+   pub fn wait_for_timeout<T>(&self, timeout: Duration) -> Option<MessageToken<'_, T>>
    where
       T: 'static + Send,
    {
@@ -135,25 +130,78 @@ impl Bus {
    }
 }
 
+/// A message token. This token is used to either consume, or ignore a message.
+pub struct MessageToken<'m, T>
+where
+   T: 'static + Send,
+{
+   message: &'m Message,
+   data: Option<Box<T>>,
+}
+
+impl<'m, T> MessageToken<'m, T>
+where
+   T: 'static + Send,
+{
+   /// Creates a new message token with the given type, referring to the given message.
+   ///
+   /// This trusts that the message is of the given type.
+   fn new(message: &'m Message) -> Self {
+      let data = message.take().unwrap();
+      Self {
+         message,
+         data: Some(data),
+      }
+   }
+
+   /// Consumes the message referred to by the token and returns its inner data.
+   ///
+   /// This removes the message from the bus, so subsequent calls to `receive_all` and `wait_for`
+   /// will not yield this message.
+   pub fn consume(mut self) -> T {
+      *self.data.take().unwrap()
+   }
+}
+
+impl<T> Deref for MessageToken<'_, T>
+where
+   T: 'static + Send,
+{
+   type Target = T;
+
+   fn deref(&self) -> &Self::Target {
+      self.data.as_ref().unwrap()
+   }
+}
+
+impl<T> Drop for MessageToken<'_, T>
+where
+   T: 'static + Send,
+{
+   fn drop(&mut self) {
+      let data = self.data.take().unwrap();
+      self.message.put(data);
+   }
+}
+
 /// A message on the bus.
-#[derive(Debug)]
 struct Message {
    type_id: TypeId,
    // What a chain.
    data: Mutex<RefCell<Option<Box<dyn Any + Send>>>>,
-   wakeup: Arc<Wakeup>,
+   store: Weak<Messages>,
 }
 
 impl Message {
    /// Boxes the provided message data into a message.
-   fn new<T>(data: T, wakeup: Arc<Wakeup>) -> Message
+   fn new<T>(data: T, store: Weak<Messages>) -> Message
    where
       T: 'static + Send,
    {
       Self {
          type_id: Any::type_id(&data),
          data: Mutex::new(RefCell::new(Some(Box::new(data)))),
-         wakeup,
+         store,
       }
    }
 
@@ -171,9 +219,9 @@ impl Message {
       }
    }
 
-   /// If the stored data is of the provided type `T`, and hasn't been consumed yet, takes the data
+   /// If the stored data is of the provided type `T`, and hasn't been taken out yet, takes the data
    /// out of the message and returns `Some(data)`. Otherwise, returns `None`.
-   fn consume<T>(&self) -> Option<T>
+   fn take<T>(&self) -> Option<Box<T>>
    where
       T: 'static + Send,
    {
@@ -181,30 +229,35 @@ impl Message {
          let locked = self.data.lock().unwrap();
          let mut borrowed = locked.borrow_mut();
          let boxed = borrowed.take()?;
-         self.wakeup.count.fetch_sub(1, ATOMIC_ORDERING);
-         Some(*boxed.downcast::<T>().ok()?)
+         // The Weak in the Message can't possibly outlive the Arc of the message store.
+         let store_arc = self.store.upgrade().unwrap();
+         Some(boxed.downcast::<T>().ok()?)
       } else {
          None
       }
    }
-}
 
-/// Wakeup information for a given message type.
-#[derive(Debug)]
-struct Wakeup {
-   condvar: Condvar,
-   count: AtomicUsize,
+   /// Puts some data back into a message.
+   fn put<T>(&self, data: Box<T>)
+   where
+      T: 'static + Send,
+   {
+      let locked = self.data.lock().unwrap();
+      let mut borrowed = locked.borrow_mut();
+      borrowed.replace(data);
+   }
 }
 
 /// A store for messages of a single type.
 struct Messages {
-   messages: VecDeque<Message>,
-   wakeup: Arc<Wakeup>,
+   messages: Mutex<Vec<Message>>,
+   freed_messages: Mutex<Vec<usize>>,
+   condvar: Condvar,
 }
 
 /// The bus's inner message store.
 struct BusInner {
-   messages: HashMap<TypeId, Arc<Mutex<Messages>>>,
+   messages: HashMap<TypeId, Arc<Messages>>,
 }
 
 impl BusInner {
@@ -217,27 +270,20 @@ impl BusInner {
 
    /// Locks and returns a handle to the message store for the given type ID, creating a new message
    /// store if it doesn't already exist.
-   fn get_or_create_message_store(&mut self, type_id: TypeId) -> MutexGuard<'_, Messages> {
-      self
-         .messages
-         .entry(type_id)
-         .or_insert_with(|| {
-            Arc::new(Mutex::new(Messages {
-               messages: VecDeque::new(),
-               wakeup: Arc::new(Wakeup {
-                  condvar: Condvar::new(),
-                  count: AtomicUsize::new(0),
-               }),
-            }))
+   fn get_or_create_message_store(&mut self, type_id: TypeId) -> &Arc<Messages> {
+      self.messages.entry(type_id).or_insert_with(|| {
+         Arc::new(Messages {
+            messages: Mutex::new(Vec::new()),
+            freed_messages: Mutex::new(Vec::new()),
+            condvar: Condvar::new(),
          })
-         .lock()
-         .unwrap()
+      })
    }
 
    /// Locks and returns a handle to a message store for the given type ID. Panics if the message
    /// store for the type ID does not exist.
-   fn get_message_store(&mut self, type_id: TypeId) -> MutexGuard<'_, Messages> {
-      self.messages.get_mut(&type_id).unwrap().lock().unwrap()
+   fn get_message_store(&mut self, type_id: TypeId) -> &Arc<Messages> {
+      self.messages.get(&type_id).unwrap()
    }
 
    /// Pushes a message onto the bus.
@@ -246,10 +292,9 @@ impl BusInner {
       T: 'static + Send,
    {
       let type_id = TypeId::of::<T>();
-      let mut store = self.get_or_create_message_store(type_id);
-      let wakeup = Arc::clone(&store.wakeup);
-      store.messages.push_back(Message::new(message_data, wakeup));
-      store.wakeup.count.fetch_add(1, ATOMIC_ORDERING);
-      store.wakeup.condvar.notify_one();
+      let store = self.get_or_create_message_store(type_id);
+      let mut messages = store.messages.lock().unwrap();
+      messages.push(Message::new(message_data, Arc::downgrade(store)));
+      store.condvar.notify_one();
    }
 }
