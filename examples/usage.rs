@@ -29,7 +29,7 @@ fn local_bus() {
          // The thread will wait indefinitely until it receives an Add message. It's good practice
          // to specify which message you want to receive explicitly, as type inference can hide
          // that information away.
-         match bus.wait_for::<Add>() {
+         match bus.wait_for::<Add>().consume() {
             Add::Two(a, b) => bus.push(AdditionResult(a + b)),
             Add::Quit => break,
          }
@@ -51,7 +51,8 @@ fn local_bus() {
    // Now we can take a look at our results and print them all out. Note that while `retrieve_all`
    // is performing its job of draining the message queue, the bus for the given type of messages
    // is locked and new messages will not be pushed until the loop finishes.
-   bus.retrieve_all(|AdditionResult(x)| {
+   bus.retrieve_all::<AdditionResult, _>(|message| {
+      let AdditionResult(x) = message.consume();
       println!("{}", x);
    });
 }
@@ -62,7 +63,7 @@ fn global_bus() {
 
    let adder = std::thread::spawn(move || loop {
       // We use `nysa::global::wait_for` to retrieve messages from the global bus.
-      match bus::wait_for::<Add>() {
+      match bus::wait_for::<Add>().consume() {
          Add::Two(a, b) => bus::push(AdditionResult(a + b)),
          Add::Quit => break,
       }
@@ -77,7 +78,8 @@ fn global_bus() {
    adder.join().unwrap();
 
    // We use `nysa::global::retrieve_all` to retrieve all messages of a given type from the bus.
-   bus::retrieve_all(|AdditionResult(x)| {
+   bus::retrieve_all::<AdditionResult, _>(|message| {
+      let AdditionResult(x) = message.consume();
       println!("{}", x);
    });
 }

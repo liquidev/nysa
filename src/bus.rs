@@ -2,14 +2,12 @@
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
-
-const ATOMIC_ORDERING: Ordering = Ordering::SeqCst;
 
 /// A bus for passing messages across threads.
 ///
@@ -44,25 +42,29 @@ impl Bus {
    /// # See also
    /// - [`Bus::wait_for`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn retrieve_all<T>(&self, mut iter: impl FnMut(T))
+   pub fn retrieve_all<'bus, T, I>(&'bus self, mut iter: I)
    where
       T: 'static + Send,
+      I: FnMut(Message<'bus, T>),
    {
-      // let type_id = TypeId::of::<T>();
-      // let store_mutex = {
-      //    let locked = self.inner.lock().unwrap();
-      //    let mut borrowed = locked.borrow_mut();
-      //    match borrowed.messages.get_mut(&type_id) {
-      //       Some(store) => Arc::clone(store),
-      //       _ => return,
-      //    }
-      // };
-      // let mut store = store_mutex.lock().unwrap();
-      // for message in store.messages.iter() {}
+      let type_id = TypeId::of::<T>();
+      let store = {
+         let locked = self.inner.lock().unwrap();
+         let mut borrowed = locked.borrow_mut();
+         match borrowed.messages.get_mut(&type_id) {
+            Some(store) => Arc::clone(store),
+            _ => return,
+         }
+      };
+      let messages = store.messages.lock().unwrap();
+      for dyn_message in messages.iter() {
+         let message = Message::new(Arc::clone(dyn_message));
+         iter(message);
+      }
    }
 
    /// Blocks execution until a message of the given type arrives on the bus.
-   fn wait_for_impl<T>(&self, timeout: Option<Duration>) -> Option<MessageToken<'_, T>>
+   fn wait_for_impl<'bus, T>(&'bus self, timeout: Option<Duration>) -> Option<Message<'bus, T>>
    where
       T: 'static + Send,
    {
@@ -75,7 +77,7 @@ impl Bus {
       };
       let mut messages = store.messages.lock().unwrap();
 
-      while messages.len() - store.freed_messages.lock().unwrap().len() == 0 {
+      while store.message_count.load(Ordering::SeqCst) == 0 {
          match timeout {
             Some(duration) => {
                let (mguard, timeout) = store.condvar.wait_timeout(messages, duration).unwrap();
@@ -89,8 +91,16 @@ impl Bus {
             }
          }
       }
+      let mut dyn_message = None;
+      for msg in messages.iter() {
+         if msg.is::<T>() {
+            dyn_message = Some(msg);
+            break;
+         }
+      }
+      let dyn_message = dyn_message.unwrap();
 
-      let token = MessageToken::new(message);
+      let token = Message::new(Arc::clone(dyn_message));
       Some(token)
    }
 
@@ -104,7 +114,7 @@ impl Bus {
    /// # See also
    /// - [`Bus::retrieve_all`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn wait_for<T>(&self) -> MessageToken<'_, T>
+   pub fn wait_for<'bus, T>(&'bus self) -> Message<'bus, T>
    where
       T: 'static + Send,
    {
@@ -122,7 +132,7 @@ impl Bus {
    /// # See also
    /// - [`Bus::retrieve_all`]
    /// - [`Bus::wait_for`]
-   pub fn wait_for_timeout<T>(&self, timeout: Duration) -> Option<MessageToken<'_, T>>
+   pub fn wait_for_timeout<'bus, T>(&'bus self, timeout: Duration) -> Option<Message<'bus, T>>
    where
       T: 'static + Send,
    {
@@ -130,31 +140,36 @@ impl Bus {
    }
 }
 
-/// A message token. This token is used to either consume, or ignore a message.
-pub struct MessageToken<'m, T>
+/// A message on the bus.
+///
+/// Messages can be read, and then ignored, or consumed. A message handle must not outlive the bus
+/// it was pushed to, hence the lifetime `'bus`.
+pub struct Message<'bus, T>
 where
    T: 'static + Send,
 {
-   message: &'m Message,
+   message: Arc<DynMessage>,
    data: Option<Box<T>>,
+   _phantom_data: PhantomData<&'bus BusInner>,
 }
 
-impl<'m, T> MessageToken<'m, T>
+impl<'bus, T> Message<'bus, T>
 where
    T: 'static + Send,
 {
-   /// Creates a new message token with the given type, referring to the given message.
+   /// Creates a new message with the given type, referring to the given message.
    ///
    /// This trusts that the message is of the given type.
-   fn new(message: &'m Message) -> Self {
+   fn new(message: Arc<DynMessage>) -> Self {
       let data = message.take().unwrap();
       Self {
          message,
          data: Some(data),
+         _phantom_data: PhantomData,
       }
    }
 
-   /// Consumes the message referred to by the token and returns its inner data.
+   /// Consumes the message and returns its inner data.
    ///
    /// This removes the message from the bus, so subsequent calls to `receive_all` and `wait_for`
    /// will not yield this message.
@@ -163,7 +178,7 @@ where
    }
 }
 
-impl<T> Deref for MessageToken<'_, T>
+impl<T> Deref for Message<'_, T>
 where
    T: 'static + Send,
 {
@@ -174,32 +189,31 @@ where
    }
 }
 
-impl<T> Drop for MessageToken<'_, T>
+impl<T> Drop for Message<'_, T>
 where
    T: 'static + Send,
 {
    fn drop(&mut self) {
-      let data = self.data.take().unwrap();
-      self.message.put(data);
+      if let Some(data) = self.data.take() {
+         self.message.put(data);
+      }
    }
 }
 
-/// A message on the bus.
-struct Message {
-   type_id: TypeId,
+/// A message on the bus, with its type erased.
+struct DynMessage {
    // What a chain.
    data: Mutex<RefCell<Option<Box<dyn Any + Send>>>>,
-   store: Weak<Messages>,
+   store: Weak<MessageStore>,
 }
 
-impl Message {
+impl DynMessage {
    /// Boxes the provided message data into a message.
-   fn new<T>(data: T, store: Weak<Messages>) -> Message
+   fn new<T>(data: T, store: Weak<MessageStore>) -> DynMessage
    where
       T: 'static + Send,
    {
       Self {
-         type_id: Any::type_id(&data),
          data: Mutex::new(RefCell::new(Some(Box::new(data)))),
          store,
       }
@@ -229,8 +243,7 @@ impl Message {
          let locked = self.data.lock().unwrap();
          let mut borrowed = locked.borrow_mut();
          let boxed = borrowed.take()?;
-         // The Weak in the Message can't possibly outlive the Arc of the message store.
-         let store_arc = self.store.upgrade().unwrap();
+         self.store.upgrade().unwrap().message_count.fetch_sub(1, Ordering::SeqCst);
          Some(boxed.downcast::<T>().ok()?)
       } else {
          None
@@ -249,15 +262,15 @@ impl Message {
 }
 
 /// A store for messages of a single type.
-struct Messages {
-   messages: Mutex<Vec<Message>>,
-   freed_messages: Mutex<Vec<usize>>,
+struct MessageStore {
+   messages: Mutex<Vec<Arc<DynMessage>>>,
+   message_count: AtomicUsize,
    condvar: Condvar,
 }
 
 /// The bus's inner message store.
 struct BusInner {
-   messages: HashMap<TypeId, Arc<Messages>>,
+   messages: HashMap<TypeId, Arc<MessageStore>>,
 }
 
 impl BusInner {
@@ -268,22 +281,16 @@ impl BusInner {
       }
    }
 
-   /// Locks and returns a handle to the message store for the given type ID, creating a new message
+   /// Returns a handle to the message store for the given type ID, creating a new message
    /// store if it doesn't already exist.
-   fn get_or_create_message_store(&mut self, type_id: TypeId) -> &Arc<Messages> {
+   fn get_or_create_message_store(&mut self, type_id: TypeId) -> &Arc<MessageStore> {
       self.messages.entry(type_id).or_insert_with(|| {
-         Arc::new(Messages {
+         Arc::new(MessageStore {
             messages: Mutex::new(Vec::new()),
-            freed_messages: Mutex::new(Vec::new()),
+            message_count: AtomicUsize::new(0),
             condvar: Condvar::new(),
          })
       })
-   }
-
-   /// Locks and returns a handle to a message store for the given type ID. Panics if the message
-   /// store for the type ID does not exist.
-   fn get_message_store(&mut self, type_id: TypeId) -> &Arc<Messages> {
-      self.messages.get(&type_id).unwrap()
    }
 
    /// Pushes a message onto the bus.
@@ -294,7 +301,9 @@ impl BusInner {
       let type_id = TypeId::of::<T>();
       let store = self.get_or_create_message_store(type_id);
       let mut messages = store.messages.lock().unwrap();
-      messages.push(Message::new(message_data, Arc::downgrade(store)));
+      let message = Arc::new(DynMessage::new(message_data, Arc::downgrade(store)));
+      messages.push(message);
+      store.message_count.fetch_add(1, Ordering::SeqCst);
       store.condvar.notify_one();
    }
 }

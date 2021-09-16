@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use lazy_static::lazy_static;
 
-use crate::{Bus, MessageToken};
+use crate::{Bus, Message};
 
 lazy_static! {
    static ref BUS: Bus = Bus::new();
@@ -20,16 +20,17 @@ where
 }
 
 /// Retrieves all messages of the given type from the global bus.
-pub fn retrieve_all<T>(iter: impl FnMut(T))
+pub fn retrieve_all<T, I>(iter: I)
 where
    T: 'static + Send,
+   I: FnMut(Message<'static, T>),
 {
    BUS.retrieve_all(iter);
 }
 
 /// Blocks execution in the current thread until a message of the provided type arrives on the
 /// bus, or the given timeout is reached.
-pub fn wait_for_timeout<T>(timeout: Duration) -> Option<MessageToken<'static, T>>
+pub fn wait_for_timeout<T>(timeout: Duration) -> Option<Message<'static, T>>
 where
    T: 'static + Send,
 {
@@ -38,7 +39,7 @@ where
 
 /// Blocks execution in the current thread indefinitely until a message of the given type is
 /// available on the global bus.
-pub fn wait_for<T>() -> MessageToken<'static, T>
+pub fn wait_for<T>() -> Message<'static, T>
 where
    T: 'static + Send,
 {
