@@ -16,7 +16,7 @@ struct AdditionResult(i32);
 
 fn main() {
    let adder = std::thread::spawn(move || loop {
-      match bus::wait_for::<Add>() {
+      match bus::wait_for::<Add>().consume() {
          Add::Two(a, b) => bus::push(AdditionResult(a + b)),
          Add::Quit => break,
       }
@@ -29,7 +29,8 @@ fn main() {
    bus::push(Add::Quit);
    adder.join().unwrap();
 
-   bus::retrieve_all(|AdditionResult(x)| {
+   bus::retrieve_all::<AdditionResult, _>(|message| {
+      let AdditionResult(x) = message.consume();
       println!("{}", x);
    });
 }
