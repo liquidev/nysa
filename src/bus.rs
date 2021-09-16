@@ -219,6 +219,13 @@ impl DynMessage {
       }
    }
 
+   /// Returns whether the message has no data stored (has already been consumed).
+   fn is_free(&self) -> bool {
+      let locked = self.data.lock().unwrap();
+      let borrowed = locked.borrow();
+      borrowed.is_none()
+   }
+
    /// Returns whether the message is of the given type. If the message data has already been
    /// [`consume`]d, returns `None`.
    fn is<T>(&self) -> bool
@@ -301,8 +308,13 @@ impl BusInner {
       let type_id = TypeId::of::<T>();
       let store = self.get_or_create_message_store(type_id);
       let mut messages = store.messages.lock().unwrap();
-      let message = Arc::new(DynMessage::new(message_data, Arc::downgrade(store)));
-      messages.push(message);
+
+      if let Some(message) = messages.iter_mut().find(|msg| msg.is_free()) {
+         message.put(Box::new(message_data));
+      } else {
+         let message = Arc::new(DynMessage::new(message_data, Arc::downgrade(store)));
+         messages.push(message);
+      }
       store.message_count.fetch_add(1, Ordering::SeqCst);
       store.condvar.notify_one();
    }
