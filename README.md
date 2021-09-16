@@ -63,6 +63,8 @@ subsystems.
 - Nysa is not production-grade software. It's a toy project built as a component of
   my collaborative painting app, [NetCanv](https://github.com/liquidev/netcanv). Maybe someday it'll
   come to a point where I'll be confident to release version 1.0, but I doubt it ever will.
+- Nysa is not battle-tested. If it ever panics on you with the panic message starting with `data race:`,
+  please report a bug.
 
 ## What's in the name?
 

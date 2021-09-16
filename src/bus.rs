@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
@@ -161,6 +161,11 @@ where
    ///
    /// This trusts that the message is of the given type.
    fn new(message: Arc<DynMessage>) -> Self {
+      assert!(
+         !message.is_borrowed.load(Ordering::SeqCst),
+         "data race: cannot borrow a message twice"
+      );
+      message.is_borrowed.store(true, Ordering::SeqCst);
       let data = message.take().unwrap();
       Self {
          message,
@@ -195,6 +200,7 @@ where
 {
    fn drop(&mut self) {
       if let Some(data) = self.data.take() {
+         self.message.is_borrowed.store(false, Ordering::SeqCst);
          self.message.put(data);
       }
    }
@@ -204,6 +210,7 @@ where
 struct DynMessage {
    // What a chain.
    data: Mutex<RefCell<Option<Box<dyn Any + Send>>>>,
+   is_borrowed: AtomicBool,
    store: Weak<MessageStore>,
 }
 
@@ -216,6 +223,7 @@ impl DynMessage {
       Self {
          data: Mutex::new(RefCell::new(Some(Box::new(data)))),
          store,
+         is_borrowed: AtomicBool::new(false),
       }
    }
 
@@ -223,7 +231,7 @@ impl DynMessage {
    fn is_free(&self) -> bool {
       let locked = self.data.lock().unwrap();
       let borrowed = locked.borrow();
-      borrowed.is_none()
+      !self.is_borrowed.load(Ordering::SeqCst) && borrowed.is_none()
    }
 
    /// Returns whether the message is of the given type. If the message data has already been
@@ -262,6 +270,10 @@ impl DynMessage {
    where
       T: 'static + Send,
    {
+      assert!(
+         !self.is_borrowed.load(Ordering::SeqCst),
+         "data race: attempt to put() a value in a borrowed message"
+      );
       let locked = self.data.lock().unwrap();
       let mut borrowed = locked.borrow_mut();
       borrowed.replace(data);
