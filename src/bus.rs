@@ -4,6 +4,7 @@ use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -52,13 +53,7 @@ impl Bus {
          let mut borrowed = locked.borrow_mut();
          Arc::clone(borrowed.get_or_create_message_store(type_id))
       };
-      RetrieveAll {
-         store,
-         messages: store.messages.lock().unwrap(),
-         index: 0,
-         _phantom_bus: PhantomData,
-         _phantom_data: PhantomData,
-      }
+      RetrieveAll::new(store)
    }
 
    /// Blocks execution until a message of the given type arrives on the bus.
@@ -210,10 +205,27 @@ where
    T: 'static + Send,
 {
    store: Arc<MessageStore>,
-   messages: MutexGuard<'m, Vec<Arc<DynMessage>>>,
+   messages: MaybeUninit<MutexGuard<'m, Vec<Arc<DynMessage>>>>,
    index: usize,
    _phantom_bus: PhantomData<&'bus Bus>,
    _phantom_data: PhantomData<T>,
+}
+
+impl<T> RetrieveAll<'_, '_, T>
+where
+   T: 'static + Send,
+{
+   fn new(store: Arc<MessageStore>) -> Self {
+      let mut iterator = RetrieveAll {
+         store,
+         messages: MaybeUninit::uninit(),
+         index: 0,
+         _phantom_bus: PhantomData,
+         _phantom_data: PhantomData,
+      };
+      iterator.messages.write(iterator.store.messages.lock().unwrap());
+      iterator
+   }
 }
 
 impl<'bus, T> Iterator for RetrieveAll<'bus, '_, T>
@@ -223,8 +235,9 @@ where
    type Item = Message<'bus, T>;
 
    fn next(&mut self) -> Option<Self::Item> {
-      if self.index < self.messages.len() {
-         let message = Message::new(Arc::clone(&self.messages[self.index]));
+      let messages = unsafe { self.messages.assume_init() };
+      if self.index < messages.len() {
+         let message = Message::new(Arc::clone(&messages[self.index]));
          Some(message)
       } else {
          None
