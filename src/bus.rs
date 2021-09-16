@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 /// A bus for passing messages across threads.
@@ -35,31 +35,29 @@ impl Bus {
       borrowed.push(message_data);
    }
 
-   /// Retrieves all messages of the given type from the bus.
+   /// Returns an iterator over all messages of the given type available on the bus.
    ///
    /// Note that the bus for the given message type is locked for the entire duration of this loop.
    ///
    /// # See also
    /// - [`Bus::wait_for`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn retrieve_all<'bus, T, I>(&'bus self, mut iter: I)
+   pub fn retrieve_all<'bus, T>(&'bus self) -> RetrieveAll<'bus, '_, T>
    where
       T: 'static + Send,
-      I: FnMut(Message<'bus, T>),
    {
       let type_id = TypeId::of::<T>();
       let store = {
          let locked = self.inner.lock().unwrap();
          let mut borrowed = locked.borrow_mut();
-         match borrowed.messages.get_mut(&type_id) {
-            Some(store) => Arc::clone(store),
-            _ => return,
-         }
+         Arc::clone(borrowed.get_or_create_message_store(type_id))
       };
-      let messages = store.messages.lock().unwrap();
-      for dyn_message in messages.iter() {
-         let message = Message::new(Arc::clone(dyn_message));
-         iter(message);
+      RetrieveAll {
+         store,
+         messages: store.messages.lock().unwrap(),
+         index: 0,
+         _phantom_bus: PhantomData,
+         _phantom_data: PhantomData,
       }
    }
 
@@ -205,6 +203,40 @@ where
       }
    }
 }
+
+/// An iterator over all messages of a given type in a bus.
+pub struct RetrieveAll<'bus, 'm, T>
+where
+   T: 'static + Send,
+{
+   store: Arc<MessageStore>,
+   messages: MutexGuard<'m, Vec<Arc<DynMessage>>>,
+   index: usize,
+   _phantom_bus: PhantomData<&'bus Bus>,
+   _phantom_data: PhantomData<T>,
+}
+
+impl<'bus, T> Iterator for RetrieveAll<'bus, '_, T>
+where
+   T: 'static + Send,
+{
+   type Item = Message<'bus, T>;
+
+   fn next(&mut self) -> Option<Self::Item> {
+      if self.index < self.messages.len() {
+         let message = Message::new(Arc::clone(&self.messages[self.index]));
+         Some(message)
+      } else {
+         None
+      }
+   }
+}
+
+/*
+
+   Implementation details
+
+*/
 
 /// A message on the bus, with its type erased.
 struct DynMessage {

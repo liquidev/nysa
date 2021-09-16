@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use lazy_static::lazy_static;
 
-use crate::{Bus, Message};
+use crate::{Bus, Message, RetrieveAll};
 
 lazy_static! {
    static ref BUS: Bus = Bus::new();
@@ -20,12 +20,11 @@ where
 }
 
 /// Retrieves all messages of the given type from the global bus.
-pub fn retrieve_all<T, I>(iter: I)
+pub fn retrieve_all<T>() -> RetrieveAll<'static, 'static, T>
 where
    T: 'static + Send,
-   I: FnMut(Message<'static, T>),
 {
-   BUS.retrieve_all(iter);
+   BUS.retrieve_all()
 }
 
 /// Blocks execution in the current thread until a message of the provided type arrives on the
