@@ -5,6 +5,7 @@ mod message;
 
 #[cfg(feature = "global")]
 pub mod global;
+pub mod iterators;
 
 pub use bus::*;
 pub use message::*;

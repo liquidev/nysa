@@ -29,10 +29,10 @@ fn main() {
    bus::push(Add::Quit);
    adder.join().unwrap();
 
-   bus::retrieve_all::<AdditionResult, _>(|message| {
+   for message in &bus::retrieve_all::<AdditionResult>() {
       let AdditionResult(x) = message.consume();
       println!("{}", x);
-   });
+   }
 }
 ```
 

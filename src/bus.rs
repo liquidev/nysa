@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::iterators::RetrieveAllRef;
 use crate::{DynMessage, Message};
 
 /// A bus for passing messages across threads.
@@ -40,24 +41,14 @@ impl Bus {
    /// # See also
    /// - [`Bus::wait_for`]
    /// - [`Bus::wait_for_timeout`]
-   pub fn retrieve_all<'bus, T, I>(&'bus self, mut iter: I)
+   pub fn retrieve_all<'bus, T>(&'bus self) -> RetrieveAllRef<'bus, T>
    where
       T: 'static + Send,
-      I: FnMut(Message<'bus, T>),
    {
       let type_id = TypeId::of::<T>();
-      let store = {
-         let mut inner = self.inner.lock().unwrap();
-         match inner.messages.get_mut(&type_id) {
-            Some(store) => Arc::clone(store),
-            _ => return,
-         }
-      };
-      let messages = store.messages.lock().unwrap();
-      for dyn_message in messages.iter() {
-         let message = Message::new(Arc::clone(dyn_message));
-         iter(message);
-      }
+      let mut inner = self.inner.lock().unwrap();
+      let store = inner.get_or_create_message_store(type_id);
+      RetrieveAllRef::new(Arc::clone(store))
    }
 
    /// Blocks execution until a message of the given type arrives on the bus.

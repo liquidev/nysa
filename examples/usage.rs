@@ -51,10 +51,10 @@ fn local_bus() {
    // Now we can take a look at our results and print them all out. Note that while `retrieve_all`
    // is performing its job of draining the message queue, the bus for the given type of messages
    // is locked and new messages will not be pushed until the loop finishes.
-   bus.retrieve_all::<AdditionResult, _>(|message| {
+   for message in &bus.retrieve_all::<AdditionResult>() {
       let AdditionResult(x) = message.consume();
       println!("{}", x);
-   });
+   }
 }
 
 // Now, let's go over the same example, but using a global bus.
@@ -78,10 +78,10 @@ fn global_bus() {
    adder.join().unwrap();
 
    // We use `nysa::global::retrieve_all` to retrieve all messages of a given type from the bus.
-   bus::retrieve_all::<AdditionResult, _>(|message| {
+   for message in &bus::retrieve_all::<AdditionResult>() {
       let AdditionResult(x) = message.consume();
       println!("{}", x);
-   });
+   }
 }
 
 fn main() {
