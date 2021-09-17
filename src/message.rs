@@ -45,7 +45,9 @@ where
    /// This removes the message from the bus, so subsequent calls to `receive_all` and `wait_for`
    /// will not yield this message.
    pub fn consume(mut self) -> T {
-      *self.data.take().unwrap()
+      let data = *self.data.take().unwrap();
+      self.message.is_borrowed.store(false, Ordering::SeqCst);
+      data
    }
 }
 
