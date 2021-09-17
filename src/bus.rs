@@ -1,7 +1,6 @@
 //! The implementation of the bus.
 
 use std::any::{Any, TypeId};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -14,14 +13,14 @@ use std::time::Duration;
 /// Nysa buses are fully thread-safe, and thus, can be stored in `static` variables. The library
 /// provides a "default" bus in the module [`crate::global`].
 pub struct Bus {
-   inner: Mutex<RefCell<BusInner>>,
+   inner: Mutex<BusInner>,
 }
 
 impl Bus {
    /// Creates a new bus.
    pub fn new() -> Self {
       Self {
-         inner: Mutex::new(RefCell::new(BusInner::new())),
+         inner: Mutex::new(BusInner::new()),
       }
    }
 
@@ -30,9 +29,8 @@ impl Bus {
    where
       T: 'static + Send,
    {
-      let locked = self.inner.lock().unwrap();
-      let mut borrowed = locked.borrow_mut();
-      borrowed.push(message_data);
+      let mut inner = self.inner.lock().unwrap();
+      inner.push(message_data);
    }
 
    /// Retrieves all messages of the given type from the bus.
@@ -49,9 +47,8 @@ impl Bus {
    {
       let type_id = TypeId::of::<T>();
       let store = {
-         let locked = self.inner.lock().unwrap();
-         let mut borrowed = locked.borrow_mut();
-         match borrowed.messages.get_mut(&type_id) {
+         let mut inner = self.inner.lock().unwrap();
+         match inner.messages.get_mut(&type_id) {
             Some(store) => Arc::clone(store),
             _ => return,
          }
@@ -71,9 +68,8 @@ impl Bus {
       let type_id = TypeId::of::<T>();
 
       let store = {
-         let locked = self.inner.lock().unwrap();
-         let mut borrowed = locked.borrow_mut();
-         Arc::clone(borrowed.get_or_create_message_store(type_id))
+         let mut inner = self.inner.lock().unwrap();
+         Arc::clone(inner.get_or_create_message_store(type_id))
       };
       let mut messages = store.messages.lock().unwrap();
 
@@ -209,7 +205,7 @@ where
 /// A message on the bus, with its type erased.
 struct DynMessage {
    // What a chain.
-   data: Mutex<RefCell<Option<Box<dyn Any + Send>>>>,
+   data: Mutex<Option<Box<dyn Any + Send>>>,
    is_borrowed: AtomicBool,
    store: Weak<MessageStore>,
 }
@@ -221,7 +217,7 @@ impl DynMessage {
       T: 'static + Send,
    {
       Self {
-         data: Mutex::new(RefCell::new(Some(Box::new(data)))),
+         data: Mutex::new(Some(Box::new(data))),
          store,
          is_borrowed: AtomicBool::new(false),
       }
@@ -229,9 +225,8 @@ impl DynMessage {
 
    /// Returns whether the message has no data stored (has already been consumed).
    fn is_free(&self) -> bool {
-      let locked = self.data.lock().unwrap();
-      let borrowed = locked.borrow();
-      !self.is_borrowed.load(Ordering::SeqCst) && borrowed.is_none()
+      let data = self.data.lock().unwrap();
+      !self.is_borrowed.load(Ordering::SeqCst) && data.is_none()
    }
 
    /// Returns whether the message is of the given type. If the message data has already been
@@ -240,9 +235,8 @@ impl DynMessage {
    where
       T: 'static + Send,
    {
-      let locked = self.data.lock().unwrap();
-      let borrowed = locked.borrow();
-      match borrowed.deref() {
+      let data = self.data.lock().unwrap();
+      match data.deref() {
          Some(x) => x.is::<T>(),
          None => false,
       }
@@ -255,9 +249,8 @@ impl DynMessage {
       T: 'static + Send,
    {
       if self.is::<T>() {
-         let locked = self.data.lock().unwrap();
-         let mut borrowed = locked.borrow_mut();
-         let boxed = borrowed.take()?;
+         let mut data = self.data.lock().unwrap();
+         let boxed = data.take()?;
          self.store.upgrade().unwrap().message_count.fetch_sub(1, Ordering::SeqCst);
          Some(boxed.downcast::<T>().ok()?)
       } else {
@@ -274,9 +267,8 @@ impl DynMessage {
          !self.is_borrowed.load(Ordering::SeqCst),
          "data race: attempt to put() a value in a borrowed message"
       );
-      let locked = self.data.lock().unwrap();
-      let mut borrowed = locked.borrow_mut();
-      borrowed.replace(data);
+      let mut locked = self.data.lock().unwrap();
+      locked.replace(data);
    }
 }
 
