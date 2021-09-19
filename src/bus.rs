@@ -30,8 +30,11 @@ impl Bus {
    where
       T: 'static + Send,
    {
+      let type_id = TypeId::of::<T>();
       let mut inner = self.inner.lock().unwrap();
-      inner.push(message_data);
+      let store = Arc::clone(inner.get_or_create_message_store(type_id));
+      drop(inner);
+      store.push(message_data);
    }
 
    /// Retrieves all messages of the given type from the bus.
@@ -60,7 +63,9 @@ impl Bus {
 
       let store = {
          let mut inner = self.inner.lock().unwrap();
-         Arc::clone(inner.get_or_create_message_store(type_id))
+         let arc = Arc::clone(inner.get_or_create_message_store(type_id));
+         drop(inner);
+         arc
       };
       let mut messages = store.messages.lock().unwrap();
 
@@ -134,6 +139,25 @@ pub(crate) struct MessageStore {
    pub condvar: Condvar,
 }
 
+impl MessageStore {
+   /// Pushes a message into the store.
+   fn push<T>(self: Arc<Self>, message_data: T)
+   where
+      T: 'static + Send,
+   {
+      let mut messages = self.messages.lock().unwrap();
+
+      if let Some(message) = messages.iter().find(|msg| msg.is_free()) {
+         message.put(Box::new(message_data));
+      } else {
+         let message = Arc::new(DynMessage::new(message_data, Arc::downgrade(&self)));
+         messages.push(message);
+      }
+      self.message_count.fetch_add(1, Ordering::SeqCst);
+      self.condvar.notify_one();
+   }
+}
+
 /// The bus's inner message store.
 pub(crate) struct BusInner {
    messages: HashMap<TypeId, Arc<MessageStore>>,
@@ -157,24 +181,5 @@ impl BusInner {
             condvar: Condvar::new(),
          })
       })
-   }
-
-   /// Pushes a message onto the bus.
-   fn push<T>(&mut self, message_data: T)
-   where
-      T: 'static + Send,
-   {
-      let type_id = TypeId::of::<T>();
-      let store = self.get_or_create_message_store(type_id);
-      let mut messages = store.messages.lock().unwrap();
-
-      if let Some(message) = messages.iter().find(|msg| msg.is_free()) {
-         message.put(Box::new(message_data));
-      } else {
-         let message = Arc::new(DynMessage::new(message_data, Arc::downgrade(store)));
-         messages.push(message);
-      }
-      store.message_count.fetch_add(1, Ordering::SeqCst);
-      store.condvar.notify_one();
    }
 }
